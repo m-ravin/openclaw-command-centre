@@ -64,13 +64,13 @@ cd ..
 **Terminal 1 — API server:**
 ```bash
 cd server
-NODE_OPTIONS=--experimental-sqlite npx tsx src/index.ts
+NODE_OPTIONS=--experimental-sqlite npx tsx src/index.ts &
 ```
 
 **Terminal 2 — Frontend:**
 ```bash
 cd apps/web
-node node_modules/next/dist/bin/next dev -p 3000
+npx next dev -p 3000 &
 ```
 
 Open **http://localhost:3000** in your browser.
