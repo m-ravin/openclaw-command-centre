@@ -26,6 +26,7 @@ import { settingsRouter }  from './routes/settings';
 import { kbRouter }        from './routes/kb';
 import { operatorsRouter } from './routes/operators';
 import { filesRouter }     from './routes/files';
+import { hooksRouter }     from './routes/hooks';
 
 const PORT      = parseInt(process.env.PORT ?? '4000', 10);
 const WS_PORT   = parseInt(process.env.WS_PORT ?? '4001', 10);
@@ -54,6 +55,7 @@ app.use('/api/settings',  settingsRouter);
 app.use('/api/kb',        kbRouter);
 app.use('/api/operators', operatorsRouter);
 app.use('/api/files',    filesRouter);
+app.use('/api/hooks',    hooksRouter);
 
 app.get('/api/health', (_req, res) => {
   res.json({
