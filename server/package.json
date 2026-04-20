@@ -1,0 +1,36 @@
+{
+  "name": "@openclaw/server",
+  "version": "1.0.0",
+  "description": "OpenClaw Command Centre — Backend Server",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "node --experimental-sqlite --import tsx/esm src/index.ts",
+    "dev:tsx": "tsx --conditions=node src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:seed": "tsx src/db/seed.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "node-cron": "^3.0.3",
+    "systeminformation": "^5.23.9",
+    "ws": "^8.18.0",
+    "uuid": "^11.0.3",
+    "zod": "^3.24.1",
+    "axios": "^1.7.9",
+    "chokidar": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.5.13",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

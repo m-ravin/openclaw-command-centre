@@ -1,0 +1,21 @@
+{
+  "name": "openclaw-command-centre",
+  "version": "1.0.0",
+  "description": "Enterprise-grade OpenClaw AI Agent Operations Command Centre",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:server": "npm run dev --workspace=server",
+    "build": "npm run build --workspace=server && npm run build --workspace=apps/web",
+    "start": "concurrently \"npm run start --workspace=server\" \"npm run start --workspace=apps/web\"",
+    "install:all": "npm install && npm install --workspace=apps/web && npm install --workspace=server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

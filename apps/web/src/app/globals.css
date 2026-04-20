@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --scrollbar-thumb: #2d3447;
+  --scrollbar-track: #13161e;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar        { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track  { background: var(--scrollbar-track); }
+*::-webkit-scrollbar-thumb  { background: var(--scrollbar-thumb); border-radius: 3px; }
+
+html, body {
+  @apply bg-surface text-slate-200 antialiased;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+/* Recharts tweaks for dark mode */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: rgba(255, 255, 255, 0.04) !important;
+}
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: #1f2433 !important;
+  border: 1px solid rgba(255,255,255,0.08) !important;
+  border-radius: 8px !important;
+}
+.recharts-tooltip-label {
+  color: #94a3b8 !important;
+}

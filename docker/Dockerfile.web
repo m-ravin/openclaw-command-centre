@@ -1,0 +1,33 @@
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+# Copy workspace manifests
+COPY package.json package-lock.json ./
+COPY apps/web/package.json ./apps/web/
+
+# Install dependencies
+RUN npm install --workspace=apps/web
+RUN cd apps/web && npm install
+
+# Copy web source
+COPY apps/web/ ./apps/web/
+
+# Build Next.js app
+WORKDIR /app/apps/web
+RUN node node_modules/next/dist/bin/next build
+
+# Production image
+FROM node:22-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=builder /app/apps/web/.next/standalone ./
+COPY --from=builder /app/apps/web/.next/static ./.next/static
+COPY --from=builder /app/apps/web/public ./public
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
