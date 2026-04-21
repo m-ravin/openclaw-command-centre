@@ -4,6 +4,7 @@ import { bus } from '../events/eventBus';
 import { v4 as uuidv4 } from 'uuid';
 import cron from 'node-cron';
 import { exec } from 'child_process';
+import { readGatewayJobs, readGatewayRuns } from '../lib/gatewayReader';
 
 export const jobsRouter = Router();
 
@@ -78,29 +79,35 @@ async function runJob(id: string): Promise<void> {
 jobsRouter.get('/kanban', (req: Request, res: Response) => {
   const { workspace = 'default' } = req.query;
 
-  const allJobs = dbAll<{
+  // Command Centre jobs
+  const ccJobs = dbAll<{
     id: string; name: string; type: string; schedule: string; description: string;
     enabled: number; last_status: string; last_run_at: string; last_duration_ms: number;
     run_count: number; error_count: number; total_tokens: number; last_model: string;
     agent_id: string; next_run_at: string;
   }>(`SELECT * FROM jobs WHERE workspace_id = ?`, [workspace]);
 
-  // Enrich with agent name + last run tokens
-  const enriched = allJobs.map(job => {
+  const enrichedCC = ccJobs.map(job => {
     const agent = job.agent_id
       ? dbGet<{ name: string; model: string }>(`SELECT name, model FROM agents WHERE id = ?`, [job.agent_id])
       : null;
     const lastRun = dbGet<{ input_tokens: number; output_tokens: number; cost: number; model: string; status: string }>(
       `SELECT input_tokens, output_tokens, cost, model, status
-       FROM job_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT 1`,
-      [job.id]
+       FROM job_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT 1`, [job.id]
     );
     return { ...job, agent_name: agent?.name ?? null, agent_model: agent?.model ?? null, last_run: lastRun ?? null };
   });
 
-  const running  = enriched.filter(j => j.last_status === 'running');
-  const pending  = enriched.filter(j => j.enabled && j.last_status !== 'running');
-  const finished = enriched.filter(j => !j.enabled || j.last_status === 'success' || j.last_status === 'error');
+  // Gateway flows — read directly, no sync needed
+  const gatewayJobs = readGatewayJobs().map(j => ({
+    ...j, agent_name: null, agent_model: null, last_run: null,
+  }));
+
+  const allJobs = [...enrichedCC, ...gatewayJobs];
+
+  const running  = allJobs.filter(j => j.last_status === 'running');
+  const pending  = allJobs.filter(j => j.enabled && j.last_status !== 'running' && j.last_status !== 'success' && j.last_status !== 'error');
+  const finished = allJobs.filter(j => j.last_status === 'success' || j.last_status === 'error');
 
   res.json({ running, pending, finished });
 });
@@ -108,17 +115,22 @@ jobsRouter.get('/kanban', (req: Request, res: Response) => {
 // ── CRUD ───────────────────────────────────────────────────────────────────
 jobsRouter.get('/', (req: Request, res: Response) => {
   const { workspace = 'default' } = req.query;
-  res.json(dbAll(`SELECT * FROM jobs WHERE workspace_id = ? ORDER BY created_at DESC`, [workspace]));
+  const ccJobs      = dbAll(`SELECT * FROM jobs WHERE workspace_id = ? ORDER BY created_at DESC`, [workspace]);
+  const gatewayJobs = readGatewayJobs();
+  res.json([...ccJobs, ...gatewayJobs]);
 });
 
 jobsRouter.get('/:id', (req: Request, res: Response) => {
-  const job = dbGet(`SELECT * FROM jobs WHERE id = ?`, [req.params.id]);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  const runs = dbAll(
-    `SELECT * FROM job_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT 20`,
-    [req.params.id]
-  );
-  res.json({ job, runs });
+  // Try Command Centre DB first, then gateway
+  const job  = dbGet(`SELECT * FROM jobs WHERE id = ?`, [req.params.id]);
+  const runs = job
+    ? dbAll(`SELECT * FROM job_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT 20`, [req.params.id])
+    : readGatewayRuns(req.params.id);
+
+  if (!job && runs.length === 0) return res.status(404).json({ error: 'Job not found' });
+
+  const gatewayJob = !job ? readGatewayJobs().find(j => j.id === req.params.id) ?? null : null;
+  res.json({ job: job ?? gatewayJob, runs });
 });
 
 jobsRouter.post('/', (req: Request, res: Response) => {

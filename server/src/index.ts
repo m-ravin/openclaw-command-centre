@@ -9,7 +9,6 @@ import rateLimit from 'express-rate-limit';
 import { getDb } from './db/database';
 import { bus } from './events/eventBus';
 import { startSystemCollector } from './collectors/systemCollector';
-import { startOpenClawSync }   from './collectors/openclawSync';
 import { initJobScheduler } from './routes/jobs';
 
 import { sessionsRouter }  from './routes/sessions';
@@ -84,9 +83,6 @@ function start() {
   );
   startSystemCollector(metricsInterval);
 
-  // Sync jobs/runs from OpenClaw gateway databases (if present)
-  const syncInterval = parseInt(process.env.SYNC_INTERVAL_SEC ?? '30', 10);
-  startOpenClawSync(syncInterval);
 
   // Load cron jobs
   initJobScheduler();
