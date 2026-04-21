@@ -1,16 +1,18 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../db/database';
 import { v4 as uuidv4 } from 'uuid';
+import { readGatewayOperators } from '../lib/gatewayReader';
 
 export const operatorsRouter = Router();
 
 operatorsRouter.get('/', (req: Request, res: Response) => {
   const { workspace = 'default', limit = 100, offset = 0 } = req.query;
-  const rows = dbAll(
-    `SELECT * FROM operators WHERE workspace_id = ? ORDER BY total_cost DESC LIMIT ? OFFSET ?`,
-    [workspace, Number(limit), Number(offset)]
-  );
-  res.json(rows);
+  const ccRows      = dbAll(`SELECT * FROM operators WHERE workspace_id = ? ORDER BY total_cost DESC LIMIT ? OFFSET ?`,
+    [workspace, Number(limit), Number(offset)]);
+  const gatewayRows = readGatewayOperators();
+  // Merge — CC rows first, gateway fills in the rest
+  const ccIds = new Set(ccRows.map((r: any) => r.identifier));
+  res.json([...ccRows, ...gatewayRows.filter(r => !ccIds.has(r.identifier))]);
 });
 
 operatorsRouter.get('/:id', (req: Request, res: Response) => {

@@ -4,7 +4,7 @@ import { bus } from '../events/eventBus';
 import { v4 as uuidv4 } from 'uuid';
 import cron from 'node-cron';
 import { exec } from 'child_process';
-import { readGatewayJobs, readGatewayRuns } from '../lib/gatewayReader';
+import { readGatewayCronJobs, readGatewayRuns } from '../lib/gatewayReader';
 
 export const jobsRouter = Router();
 
@@ -99,7 +99,7 @@ jobsRouter.get('/kanban', (req: Request, res: Response) => {
   });
 
   // Gateway flows — read directly, no sync needed
-  const gatewayJobs = readGatewayJobs().map(j => ({
+  const gatewayJobs = readGatewayCronJobs().map(j => ({
     ...j, agent_name: null, agent_model: null, last_run: null,
   }));
 
@@ -116,7 +116,7 @@ jobsRouter.get('/kanban', (req: Request, res: Response) => {
 jobsRouter.get('/', (req: Request, res: Response) => {
   const { workspace = 'default' } = req.query;
   const ccJobs      = dbAll(`SELECT * FROM jobs WHERE workspace_id = ? ORDER BY created_at DESC`, [workspace]);
-  const gatewayJobs = readGatewayJobs();
+  const gatewayJobs = readGatewayCronJobs();
   res.json([...ccJobs, ...gatewayJobs]);
 });
 
@@ -129,7 +129,7 @@ jobsRouter.get('/:id', (req: Request, res: Response) => {
 
   if (!job && runs.length === 0) return res.status(404).json({ error: 'Job not found' });
 
-  const gatewayJob = !job ? readGatewayJobs().find(j => j.id === req.params.id) ?? null : null;
+  const gatewayJob = !job ? readGatewayCronJobs().find(j => j.id === req.params.id) ?? null : null;
   res.json({ job: job ?? gatewayJob, runs });
 });
 

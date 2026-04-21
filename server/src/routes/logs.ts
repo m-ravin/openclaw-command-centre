@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../db/database';
 import { v4 as uuidv4 } from 'uuid';
+import { readGatewayLogs } from '../lib/gatewayReader';
 
 export const logsRouter = Router();
 
@@ -21,9 +22,20 @@ logsRouter.get('/', (req: Request, res: Response) => {
 
   sql += ` ORDER BY logged_at DESC LIMIT ? OFFSET ?`;
   params.push(Number(limit), Number(offset));
-  const rows = dbAll(sql, params);
+  const ccLogs = dbAll(sql, params);
 
-  res.json({ logs: rows, total });
+  // Merge gateway logs (commands.log) with CC logs
+  const gwLogs = readGatewayLogs({
+    q:     q as string | undefined,
+    level: level as string | undefined,
+    limit: Number(limit),
+  });
+
+  const merged = [...ccLogs, ...gwLogs]
+    .sort((a: any, b: any) => new Date(b.logged_at ?? 0).getTime() - new Date(a.logged_at ?? 0).getTime())
+    .slice(Number(offset), Number(offset) + Number(limit));
+
+  res.json({ logs: merged, total: total + gwLogs.length });
 });
 
 logsRouter.get('/sources', (req: Request, res: Response) => {

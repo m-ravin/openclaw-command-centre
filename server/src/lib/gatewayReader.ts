@@ -1,37 +1,24 @@
 /**
  * gatewayReader.ts
- * Reads directly from OpenClaw gateway SQLite databases (read-only).
+ * Reads directly from OpenClaw gateway files and SQLite databases (read-only).
  *
- * Data model discovered:
- *   ~/.openclaw/flows/registry.sqlite  → flow_runs   (empty — not used)
- *   ~/.openclaw/tasks/runs.sqlite      → task_runs   (11 real job runs)
- *
- * Strategy: group task_runs by `label` → each unique label = one Job.
- *           each individual task_run   = one JobRun under that label.
+ * Sources discovered:
+ *   ~/.openclaw/cron/jobs.json          → cron job definitions (name, schedule, model, state)
+ *   ~/.openclaw/tasks/runs.sqlite       → task_runs (execution history, owner_key links to job id)
+ *   ~/.openclaw/memory/main.sqlite      → files + chunks (memory browser)
+ *   ~/.openclaw/logs/commands.log       → JSON-lines command log (logs explorer)
  */
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import os   from 'os';
 import fs   from 'fs';
 
-const HOME     = os.homedir();
-const TASKS_DB = path.join(HOME, '.openclaw', 'tasks', 'runs.sqlite');
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-export interface GatewayJob {
-  id: string; name: string; schedule: string; type: string;
-  last_status: string; last_run_at: string | null;
-  run_count: number; error_count: number;
-  total_tokens: number; last_model: string | null;
-  enabled: number; source: 'gateway';
-}
-
-export interface GatewayRun {
-  id: string; job_id: string; status: string;
-  started_at: string | null; ended_at: string | null;
-  duration_ms: number | null; output: string | null; error_msg: string | null;
-  source: 'gateway';
-}
+const HOME       = os.homedir();
+const OC_DIR     = path.join(HOME, '.openclaw');
+const TASKS_DB   = path.join(OC_DIR, 'tasks',  'runs.sqlite');
+const MEMORY_DB  = path.join(OC_DIR, 'memory', 'main.sqlite');
+const CRON_JSON  = path.join(OC_DIR, 'cron',   'jobs.json');
+const COMMANDS_LOG = path.join(OC_DIR, 'logs', 'commands.log');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function toIso(ts: number | null | undefined): string | null {
@@ -39,114 +26,112 @@ function toIso(ts: number | null | undefined): string | null {
   return new Date(ts > 1_000_000_000_000 ? ts : ts * 1000).toISOString();
 }
 
-/** Map gateway status values → Command Centre status */
 function mapStatus(s: string): string {
   return ({
-    succeeded:  'success',
-    completed:  'success',
-    done:       'success',
-    success:    'success',
-    failed:     'error',
-    error:      'error',
-    timed_out:  'error',
-    cancelled:  'error',
-    running:    'running',
-    active:     'running',
-    pending:    'running',
+    succeeded: 'success', completed: 'success', done: 'success', success: 'success',
+    failed: 'error', error: 'error', timed_out: 'error', cancelled: 'error', timeout: 'error',
+    running: 'running', active: 'running', pending: 'running',
   } as Record<string, string>)[s?.toLowerCase()] ?? 'error';
 }
 
-/** Convert a label to a stable gateway job ID */
-function labelToId(label: string): string {
-  return `gw-${label.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}`;
+// ── Cron Jobs (jobs.json) ─────────────────────────────────────────────────────
+interface CronJobDef {
+  id: string; name: string; description?: string; enabled: boolean;
+  createdAtMs: number; updatedAtMs: number;
+  schedule?: { kind: string; expr?: string; tz?: string };
+  payload?: { model?: string; message?: string; timeoutSeconds?: number };
+  delivery?: { channel?: string; mode?: string };
+  state?: {
+    nextRunAtMs?: number; lastRunAtMs?: number;
+    lastRunStatus?: string; lastStatus?: string;
+    lastDurationMs?: number; consecutiveErrors?: number;
+    lastError?: string; lastErrorReason?: string;
+  };
 }
 
-/** Reverse: extract label from gateway job ID for querying */
-function idToLabel(id: string): string {
-  return id.replace(/^gw-/, '').replace(/-/g, ' ');
+export interface GatewayJob {
+  id: string; name: string; description: string; schedule: string;
+  type: string; last_status: string; last_run_at: string | null;
+  next_run_at: string | null; run_count: number; error_count: number;
+  total_tokens: number; last_model: string | null; enabled: number;
+  delivery_channel: string | null; source: 'gateway';
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
-
-/**
- * Returns one virtual Job per unique task label found in task_runs.
- * Stats (run_count, error_count, last_run_at) are aggregated from all runs.
- */
-export function readGatewayJobs(): GatewayJob[] {
-  if (!fs.existsSync(TASKS_DB)) return [];
-  let db: DatabaseSync | null = null;
+export function readGatewayCronJobs(): GatewayJob[] {
+  if (!fs.existsSync(CRON_JSON)) return [];
   try {
-    db = new DatabaseSync(TASKS_DB, { readOnly: true });
+    const raw   = JSON.parse(fs.readFileSync(CRON_JSON, 'utf-8'));
+    const jobs: CronJobDef[] = raw.jobs ?? [];
 
-    const rows = db.prepare(`
-      SELECT
-        label,
-        COUNT(*)                                                          AS run_count,
-        SUM(CASE WHEN status IN ('failed','timed_out','error','cancelled')
-                 THEN 1 ELSE 0 END)                                      AS error_count,
-        MAX(started_at)                                                   AS last_run_at,
-        (SELECT status FROM task_runs t2
-         WHERE  t2.label = t1.label
-         ORDER  BY started_at DESC LIMIT 1)                              AS last_status
-      FROM   task_runs t1
-      WHERE  label IS NOT NULL AND label != ''
-      GROUP  BY label
-      ORDER  BY MAX(started_at) DESC
-    `).all() as any[];
+    // Get run counts from task_runs (owner_key = "system:cron:{job_id}")
+    let runCounts: Record<string, number> = {};
+    if (fs.existsSync(TASKS_DB)) {
+      let db: DatabaseSync | null = null;
+      try {
+        db = new DatabaseSync(TASKS_DB, { readOnly: true });
+        const rows = db.prepare(`
+          SELECT owner_key, COUNT(*) as n
+          FROM task_runs GROUP BY owner_key
+        `).all() as any[];
+        for (const r of rows) {
+          const id = String(r.owner_key).split(':').pop() ?? '';
+          runCounts[id] = Number(r.n);
+        }
+      } finally { try { db?.close(); } catch {} }
+    }
 
-    return rows.map(r => ({
-      id:           labelToId(r.label),
-      name:         r.label as string,
-      schedule:     'openclaw-scheduled',
-      type:         'manual',
-      last_status:  mapStatus(r.last_status),
-      last_run_at:  toIso(r.last_run_at),
-      run_count:    Number(r.run_count),
-      error_count:  Number(r.error_count),
-      total_tokens: 0,
-      last_model:   null,
-      enabled:      1,
-      source:       'gateway' as const,
+    return jobs.map(j => ({
+      id:               j.id,
+      name:             j.name,
+      description:      j.description ?? '',
+      schedule:         j.schedule?.expr ?? 'manual',
+      type:             'cron',
+      last_status:      mapStatus(j.state?.lastStatus ?? j.state?.lastRunStatus ?? 'pending'),
+      last_run_at:      toIso(j.state?.lastRunAtMs),
+      next_run_at:      toIso(j.state?.nextRunAtMs),
+      run_count:        runCounts[j.id] ?? 0,
+      error_count:      j.state?.consecutiveErrors ?? 0,
+      total_tokens:     0,
+      last_model:       j.payload?.model ?? null,
+      enabled:          j.enabled ? 1 : 0,
+      delivery_channel: j.delivery?.channel ?? null,
+      source:           'gateway' as const,
     }));
   } catch (err) {
-    console.error('[gateway:jobs]', err);
+    console.error('[gateway:cron]', err);
     return [];
-  } finally {
-    try { db?.close(); } catch {}
   }
 }
 
-/**
- * Returns all task_runs for a given gateway job ID (matched by label),
- * or all task_runs if no jobId provided.
- */
+// ── Job Runs (task_runs) ──────────────────────────────────────────────────────
+export interface GatewayRun {
+  id: string; job_id: string; status: string;
+  started_at: string | null; ended_at: string | null;
+  duration_ms: number | null; output: string | null; error_msg: string | null;
+  source: 'gateway';
+}
+
 export function readGatewayRuns(jobId?: string): GatewayRun[] {
   if (!fs.existsSync(TASKS_DB)) return [];
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(TASKS_DB, { readOnly: true });
 
-    const isGateway = jobId?.startsWith('gw-');
-    const sql = isGateway
-      ? `SELECT * FROM task_runs WHERE label = ? ORDER BY started_at DESC LIMIT 100`
+    // owner_key format: "system:cron:{job_id}"
+    const ownerKey = jobId ? `system:cron:${jobId}` : null;
+    const sql = ownerKey
+      ? `SELECT * FROM task_runs WHERE owner_key = ? ORDER BY started_at DESC LIMIT 100`
       : `SELECT * FROM task_runs ORDER BY started_at DESC LIMIT 1000`;
-
-    const params = isGateway ? [idToLabel(jobId!)] : [];
-
-    // Need to reconstruct the label from the ID with proper casing
-    // so do a case-insensitive match instead
-    const sqlCI = isGateway
-      ? `SELECT * FROM task_runs WHERE LOWER(label) = LOWER(?) ORDER BY started_at DESC LIMIT 100`
-      : sql;
-
-    const rows = db.prepare(sqlCI).all(...params) as any[];
+    const rows = db.prepare(sql).all(...(ownerKey ? [ownerKey] : [])) as any[];
 
     return rows.map(r => {
       const sMs = r.started_at ? (r.started_at > 1e12 ? r.started_at : r.started_at * 1000) : null;
       const eMs = r.ended_at   ? (r.ended_at   > 1e12 ? r.ended_at   : r.ended_at   * 1000) : null;
+      // Extract job id from owner_key
+      const jid = String(r.owner_key ?? '').split(':').pop() ?? r.owner_key;
       return {
         id:          r.task_id as string,
-        job_id:      labelToId(r.label ?? 'unknown'),
+        job_id:      jid,
         status:      mapStatus(r.status),
         started_at:  toIso(r.started_at),
         ended_at:    toIso(r.ended_at),
@@ -160,15 +145,134 @@ export function readGatewayRuns(jobId?: string): GatewayRun[] {
     console.error('[gateway:runs]', err);
     return [];
   } finally {
-    try { db?.close(); } catch {}
+    try { db?.close(); } catch {} }
+}
+
+// ── Operators (cron jobs as operators) ───────────────────────────────────────
+export interface GatewayOperator {
+  id: string; workspace_id: string; identifier: string;
+  display_name: string; channel: string;
+  session_count: number; total_cost: number;
+  total_tokens: number; total_messages: number;
+  error_count: number; last_active: string | null;
+  source: 'gateway';
+}
+
+export function readGatewayOperators(): GatewayOperator[] {
+  if (!fs.existsSync(TASKS_DB)) return [];
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(TASKS_DB, { readOnly: true });
+
+    // Group by owner_key, join with cron jobs for real names
+    const rows = db.prepare(`
+      SELECT owner_key,
+             COUNT(*)                                                              AS total_runs,
+             SUM(CASE WHEN status IN ('failed','timed_out','error','cancelled')
+                      THEN 1 ELSE 0 END)                                          AS error_count,
+             MAX(last_event_at)                                                    AS last_active
+      FROM   task_runs
+      WHERE  owner_key IS NOT NULL
+      GROUP  BY owner_key
+      ORDER  BY last_active DESC
+    `).all() as any[];
+
+    // Load cron jobs for name lookup
+    let jobNames: Record<string, string> = {};
+    let jobChannels: Record<string, string> = {};
+    if (fs.existsSync(CRON_JSON)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(CRON_JSON, 'utf-8'));
+        for (const j of (raw.jobs ?? [])) {
+          jobNames[j.id]    = j.name;
+          jobChannels[j.id] = j.delivery?.channel ?? 'cron';
+        }
+      } catch {}
+    }
+
+    return rows.map(r => {
+      const parts  = String(r.owner_key).split(':');
+      const jobId  = parts[parts.length - 1];
+      const name   = jobNames[jobId] ?? `Cron ${jobId.slice(0, 8)}`;
+      const channel = jobChannels[jobId] ?? parts[1] ?? 'cron';
+      return {
+        id:             r.owner_key as string,
+        workspace_id:   'default',
+        identifier:     r.owner_key as string,
+        display_name:   name,
+        channel,
+        session_count:  Number(r.total_runs),
+        total_cost:     0,
+        total_tokens:   0,
+        total_messages: Number(r.total_runs),
+        error_count:    Number(r.error_count),
+        last_active:    toIso(r.last_active),
+        source:         'gateway' as const,
+      };
+    });
+  } catch (err) {
+    console.error('[gateway:operators]', err);
+    return [];
+  } finally {
+    try { db?.close(); } catch {} }
+}
+
+// ── Logs (commands.log JSON lines) ───────────────────────────────────────────
+export interface GatewayLog {
+  id: string; workspace_id: string; level: string;
+  source: string; message: string; logged_at: string;
+  session_id: string | null; data: string; gateway_source: 'gateway';
+}
+
+export function readGatewayLogs(opts?: { q?: string; level?: string; limit?: number }): GatewayLog[] {
+  if (!fs.existsSync(COMMANDS_LOG)) return [];
+  try {
+    const content = fs.readFileSync(COMMANDS_LOG, 'utf-8');
+    const lines   = content.trim().split('\n').filter(Boolean).reverse(); // newest first
+
+    const logs: GatewayLog[] = [];
+    let idx = 0;
+
+    for (const line of lines) {
+      if (logs.length >= (opts?.limit ?? 200)) break;
+      try {
+        const entry = JSON.parse(line);
+        const src   = String(entry.source ?? 'gateway');
+        const action = String(entry.action ?? 'event');
+        const msg   = `[${action}] ${entry.sessionKey ?? ''} ${entry.senderId ? `sender:${entry.senderId}` : ''}`.trim();
+
+        // Derive level from action/source keywords
+        const lv = src.includes('error') || action.includes('error') || action.includes('fail')
+          ? 'error'
+          : action.includes('warn')
+          ? 'warn'
+          : 'info';
+
+        if (opts?.level && opts.level !== lv) continue;
+        if (opts?.q    && !msg.toLowerCase().includes(opts.q.toLowerCase()) &&
+                          !src.toLowerCase().includes(opts.q.toLowerCase())) continue;
+
+        logs.push({
+          id:             `gw-log-${idx++}`,
+          workspace_id:   'default',
+          level:          lv,
+          source:         src,
+          message:        msg,
+          logged_at:      entry.timestamp ?? new Date().toISOString(),
+          session_id:     entry.sessionKey ?? null,
+          data:           JSON.stringify(entry),
+          gateway_source: 'gateway',
+        });
+      } catch { /* skip malformed lines */ }
+    }
+    return logs;
+  } catch (err) {
+    console.error('[gateway:logs]', err);
+    return [];
   }
 }
 
-export const gatewayAvailable = () => fs.existsSync(TASKS_DB);
-
 // ── Memory ────────────────────────────────────────────────────────────────────
-const MEMORY_DB = path.join(HOME, '.openclaw', 'memory', 'main.sqlite');
-
 export interface GatewayMemoryFile {
   id: string; name: string; file_path: string; type: string;
   content: string; size_bytes: number; last_modified: string | null;
@@ -180,22 +284,18 @@ export function readGatewayMemory(q?: string): GatewayMemoryFile[] {
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(MEMORY_DB, { readOnly: true });
-
-    // Get all files
-    const files = db.prepare(`
-      SELECT path, source, hash, mtime, size FROM files ORDER BY mtime DESC
-    `).all() as any[];
+    const files = db.prepare(
+      `SELECT path, source, hash, mtime, size FROM files ORDER BY mtime DESC`
+    ).all() as any[];
 
     return files
       .map(f => {
-        // Concatenate all text chunks for this file
-        const chunks = db!.prepare(
+        const chunks  = db!.prepare(
           `SELECT text FROM chunks WHERE path = ? ORDER BY start_line ASC`
         ).all(f.path) as any[];
         const content = chunks.map((c: any) => c.text).join('\n');
+        const name    = path.basename(f.path as string, path.extname(f.path as string));
 
-        // Filter by search query if provided
-        const name = path.basename(f.path as string, path.extname(f.path as string));
         if (q && !name.toLowerCase().includes(q.toLowerCase()) &&
                  !content.toLowerCase().includes(q.toLowerCase())) return null;
 
@@ -217,8 +317,7 @@ export function readGatewayMemory(q?: string): GatewayMemoryFile[] {
     console.error('[gateway:memory]', err);
     return [];
   } finally {
-    try { db?.close(); } catch {}
-  }
+    try { db?.close(); } catch {} }
 }
 
 export function readGatewayMemoryStats() {
@@ -226,9 +325,9 @@ export function readGatewayMemoryStats() {
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(MEMORY_DB, { readOnly: true });
-    const row = db.prepare(`
-      SELECT COUNT(*) as total, SUM(size) as total_bytes FROM files
-    `).get() as any;
+    const row = db.prepare(
+      `SELECT COUNT(*) as total, SUM(size) as total_bytes FROM files`
+    ).get() as any;
     return {
       total:       Number(row?.total ?? 0),
       duplicates:  0,
@@ -240,6 +339,8 @@ export function readGatewayMemoryStats() {
     console.error('[gateway:memory:stats]', err);
     return null;
   } finally {
-    try { db?.close(); } catch {}
-  }
+    try { db?.close(); } catch {} }
 }
+
+export const gatewayAvailable = () =>
+  fs.existsSync(TASKS_DB) || fs.existsSync(CRON_JSON);
