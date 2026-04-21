@@ -165,3 +165,81 @@ export function readGatewayRuns(jobId?: string): GatewayRun[] {
 }
 
 export const gatewayAvailable = () => fs.existsSync(TASKS_DB);
+
+// ── Memory ────────────────────────────────────────────────────────────────────
+const MEMORY_DB = path.join(HOME, '.openclaw', 'memory', 'main.sqlite');
+
+export interface GatewayMemoryFile {
+  id: string; name: string; file_path: string; type: string;
+  content: string; size_bytes: number; last_modified: string | null;
+  is_duplicate: number; archived: number; source: 'gateway';
+}
+
+export function readGatewayMemory(q?: string): GatewayMemoryFile[] {
+  if (!fs.existsSync(MEMORY_DB)) return [];
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(MEMORY_DB, { readOnly: true });
+
+    // Get all files
+    const files = db.prepare(`
+      SELECT path, source, hash, mtime, size FROM files ORDER BY mtime DESC
+    `).all() as any[];
+
+    return files
+      .map(f => {
+        // Concatenate all text chunks for this file
+        const chunks = db!.prepare(
+          `SELECT text FROM chunks WHERE path = ? ORDER BY start_line ASC`
+        ).all(f.path) as any[];
+        const content = chunks.map((c: any) => c.text).join('\n');
+
+        // Filter by search query if provided
+        const name = path.basename(f.path as string, path.extname(f.path as string));
+        if (q && !name.toLowerCase().includes(q.toLowerCase()) &&
+                 !content.toLowerCase().includes(q.toLowerCase())) return null;
+
+        return {
+          id:            f.path as string,
+          name,
+          file_path:     f.path as string,
+          type:          f.source as string ?? 'memory',
+          content,
+          size_bytes:    Number(f.size),
+          last_modified: toIso(f.mtime),
+          is_duplicate:  0,
+          archived:      0,
+          source:        'gateway' as const,
+        };
+      })
+      .filter(Boolean) as GatewayMemoryFile[];
+  } catch (err) {
+    console.error('[gateway:memory]', err);
+    return [];
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}
+
+export function readGatewayMemoryStats() {
+  if (!fs.existsSync(MEMORY_DB)) return null;
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(MEMORY_DB, { readOnly: true });
+    const row = db.prepare(`
+      SELECT COUNT(*) as total, SUM(size) as total_bytes FROM files
+    `).get() as any;
+    return {
+      total:       Number(row?.total ?? 0),
+      duplicates:  0,
+      archived:    0,
+      total_bytes: Number(row?.total_bytes ?? 0),
+      by_type:     [{ type: 'memory', n: Number(row?.total ?? 0) }],
+    };
+  } catch (err) {
+    console.error('[gateway:memory:stats]', err);
+    return null;
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}

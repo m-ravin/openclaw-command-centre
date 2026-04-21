@@ -5,18 +5,29 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { readGatewayMemory, readGatewayMemoryStats } from '../lib/gatewayReader';
 
 export const memoryRouter = Router();
 
 memoryRouter.get('/', (req: Request, res: Response) => {
   const { workspace = 'default', type, archived = 'false', q, limit = 100, offset = 0 } = req.query;
+
+  // Read from gateway memory DB directly
+  const gatewayFiles = readGatewayMemory(q as string | undefined);
+
+  // Also include any manually added files from Command Centre DB
   let sql = `SELECT * FROM memory_files WHERE workspace_id = ? AND archived = ?`;
   const params: unknown[] = [workspace, archived === 'true' ? 1 : 0];
   if (type) { sql += ` AND type = ?`; params.push(type); }
   if (q)    { sql += ` AND (name LIKE ? OR content LIKE ?)`; params.push(`%${q}%`, `%${q}%`); }
   sql += ` ORDER BY last_modified DESC LIMIT ? OFFSET ?`;
   params.push(Number(limit), Number(offset));
-  res.json(dbAll(sql, params));
+  const ccFiles = dbAll(sql, params);
+
+  // Gateway files take priority; merge with CC files (avoid duplicates by name)
+  const ccNames = new Set(ccFiles.map((f: any) => f.name));
+  const merged  = [...ccFiles, ...gatewayFiles.filter(f => !ccNames.has(f.name))];
+  res.json(merged);
 });
 
 memoryRouter.get('/:id', (req: Request, res: Response) => {
@@ -55,6 +66,14 @@ memoryRouter.post('/:id/archive', (req: Request, res: Response) => {
 
 memoryRouter.get('/stats/summary', (req: Request, res: Response) => {
   const { workspace = 'default' } = req.query;
+
+  // Try gateway stats first
+  const gwStats = readGatewayMemoryStats();
+  if (gwStats && gwStats.total > 0) {
+    return res.json(gwStats);
+  }
+
+  // Fall back to Command Centre DB
   const stats = dbGet<{ total: number; duplicates: number; archived: number; total_bytes: number }>(
     `SELECT COUNT(*) as total,
        SUM(CASE WHEN is_duplicate = 1 THEN 1 ELSE 0 END) as duplicates,
