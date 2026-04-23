@@ -28,9 +28,12 @@
    - [Operators](#11-operators)
    - [Settings](#12-settings)
 5. [Architecture](#architecture)
-6. [Environment Variables](#environment-variables)
-7. [Tech Stack](#tech-stack)
-8. [Installation Guide](#installation-guide)
+6. [Gateway Data Sources](#gateway-data-sources)
+   - [Where each page gets its data](#where-each-page-gets-its-data)
+   - [Logs directory configuration](#logs-directory-configuration)
+7. [Environment Variables](#environment-variables)
+8. [Tech Stack](#tech-stack)
+9. [Installation Guide](#installation-guide)
 
 ---
 
@@ -395,6 +398,70 @@ openclaw-command-centre/
 ```
 Browser  ──SWR polling──▶  Express REST API  ──▶  node:sqlite DB
 Browser  ◀──WebSocket──    Event Bus          ◀──  systemCollector / routes
+```
+
+---
+
+## Gateway Data Sources
+
+The Command Centre reads **directly** from OpenClaw's own files and databases — no background sync needed. Every page load fetches live data.
+
+### Where each page gets its data
+
+| Page | Source | Path |
+|------|--------|------|
+| **Jobs** | Cron job definitions | `~/.openclaw/cron/jobs.json` |
+| **Jobs** (run history) | Task execution DB | `~/.openclaw/tasks/runs.sqlite` → `task_runs` table |
+| **Operators** | Task runs grouped by owner | `~/.openclaw/tasks/runs.sqlite` → `task_runs` table |
+| **Logs** | Gateway structured logs | `/tmp/openclaw/openclaw-YYYY-MM-DD.log` |
+| **Logs** (secondary) | Config change audit trail | `~/.openclaw/logs/config-audit.jsonl` |
+| **Memory** | Memory file chunks | `~/.openclaw/memory/main.sqlite` → `files` + `chunks` tables |
+
+All database reads are **read-only** — the Command Centre never writes to OpenClaw's own files.
+
+---
+
+### Logs directory configuration
+
+OpenClaw writes daily rotating log files to `/tmp/openclaw/` by default. If your installation writes logs to a **different path**, you need to update one constant in the server code.
+
+**File to edit:**
+```
+server/src/lib/gatewayReader.ts
+```
+
+**Line to change** (near the top of the file, after the other path constants):
+```typescript
+// Change this line:
+const TMP_LOG_DIR = '/tmp/openclaw';
+
+// To your actual log directory, for example:
+const TMP_LOG_DIR = '/var/log/openclaw';
+// or
+const TMP_LOG_DIR = '/home/youruser/.openclaw/logs';
+```
+
+**Log file naming:** The reader expects files named `openclaw-YYYY-MM-DD.log` (e.g. `openclaw-2026-04-21.log`). If your files use a different naming pattern, also update this regex on the line below `readdirSync`:
+```typescript
+// Change the pattern to match your filenames:
+.filter(f => /^openclaw-\d{4}-\d{2}-\d{2}\.log$/.test(f))
+```
+
+After making changes, restart the server:
+```bash
+sudo systemctl restart openclaw-server
+# or in development:
+cd server && npx tsx src/index.ts
+```
+
+**How to find where OpenClaw writes its logs:**
+```bash
+# Check OpenClaw config for log path
+cat ~/.openclaw/openclaw.json | grep -i log
+
+# Or watch where files appear when the gateway runs
+ls -la /tmp/openclaw/
+ls -la ~/.openclaw/logs/
 ```
 
 ---
