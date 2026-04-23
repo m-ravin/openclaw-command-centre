@@ -14,7 +14,7 @@ import {
 
 const PROVIDER_COLORS: Record<string, string> = {
   anthropic: '#f97316', openai: '#10b981', ollama: '#3b82f6',
-  gemini: '#eab308', openrouter: '#a855f7',
+  gemini: '#eab308', openrouter: '#a855f7', groq: '#22d3ee',
 };
 
 const DAY_OPTIONS = [
@@ -29,6 +29,7 @@ export default function CostsPage() {
   const { workspace, privacyBlurNums } = useAppStore();
   const blur = privacyBlurNums ? 'blur-sm select-none' : '';
   const [days, setDays] = useState(30);
+  const [jobProvider, setJobProvider] = useState('');
 
   const { data: costs } = useSWR(
     `/costs/summary?workspace=${workspace}&days=${days}`,
@@ -225,71 +226,103 @@ export default function CostsPage() {
       </div>
 
       {/* Token Usage by Job / Prompt */}
-      {costs?.by_job && costs.by_job.length > 0 && (
-        <div className="bg-surface-2 border border-white/5 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Bot className="w-4 h-4 text-brand" />
-              <h2 className="text-sm font-semibold text-white">Token Usage by Job / Prompt</h2>
-            </div>
-            <span className="text-xs text-slate-500">{costs.by_job.length} sessions</span>
-          </div>
-          <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-surface-2 z-10">
-                <tr className="border-b border-white/5 text-xs text-slate-500 uppercase tracking-wider">
-                  <th className="px-4 py-2 text-left">Job / Prompt</th>
-                  <th className="px-4 py-2 text-left">Model</th>
-                  <th className="px-4 py-2 text-right">Input Tok</th>
-                  <th className="px-4 py-2 text-right">Output Tok</th>
-                  <th className="px-4 py-2 text-right">Total Tok</th>
-                  <th className="px-4 py-2 text-right">Cost</th>
-                  <th className="px-4 py-2 text-right">Last Run</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {(() => {
-                  const grandTotal = costs.by_job.reduce((s, x) => s + x.inputTokens + x.outputTokens, 0);
-                  return costs.by_job.map((j, i) => {
-                  const totalTok = j.inputTokens + j.outputTokens;
-                  const pct = grandTotal > 0 ? Math.round((totalTok / grandTotal) * 100) : 0;
+      {costs?.by_job && costs.by_job.length > 0 && (() => {
+        // Unique providers for filter tabs
+        const providers = ['', ...Array.from(new Set(costs.by_job.map(j => j.provider))).sort()];
+        const filtered  = jobProvider ? costs.by_job.filter(j => j.provider === jobProvider) : costs.by_job;
+        const grandTotal = costs.by_job.reduce((s, x) => s + x.inputTokens + x.outputTokens, 0);
+
+        return (
+          <div className="bg-surface-2 border border-white/5 rounded-xl overflow-hidden">
+            {/* Header */}
+            <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Bot className="w-4 h-4 text-brand" />
+                <h2 className="text-sm font-semibold text-white">Token Usage by Job / Prompt</h2>
+              </div>
+              {/* Provider filter pills */}
+              <div className="flex items-center gap-1 flex-wrap">
+                {providers.map(p => {
+                  const color = PROVIDER_COLORS[p] ?? '#6366f1';
+                  const active = jobProvider === p;
+                  const count  = p ? costs.by_job.filter(j => j.provider === p).length : costs.by_job.length;
                   return (
-                    <tr key={i} className="hover:bg-white/2">
-                      <td className="px-4 py-2 max-w-[260px]">
-                        <div className="flex flex-col gap-0.5">
-                          <span className="text-xs text-slate-200 truncate">{j.label || '(unnamed)'}</span>
-                          <div className="w-full bg-surface-4 rounded-full h-1 mt-0.5">
-                            <div className="h-1 rounded-full bg-brand/60" style={{ width: `${pct}%` }} />
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-2">
-                        <div className="flex flex-col gap-0.5">
-                          <ProviderBadge provider={j.provider} />
-                          <span className="font-mono text-[10px] text-slate-500 truncate max-w-[120px]">{j.model}</span>
-                        </div>
-                      </td>
-                      <td className={`px-4 py-2 text-right font-mono text-xs text-slate-300 ${blur}`}>{formatTokens(j.inputTokens)}</td>
-                      <td className={`px-4 py-2 text-right font-mono text-xs text-accent-cyan ${blur}`}>{formatTokens(j.outputTokens)}</td>
-                      <td className={`px-4 py-2 text-right font-mono text-xs font-semibold text-white ${blur}`}>
-                        {formatTokens(totalTok)}
-                        <span className="ml-1 text-[10px] text-slate-500 font-normal">{pct}%</span>
-                      </td>
-                      <td className={`px-4 py-2 text-right font-mono text-xs text-accent-amber ${blur}`}>
-                        {j.cost > 0 ? `$${j.cost.toFixed(4)}` : costs.is_local_model ? 'Local' : '$0'}
-                      </td>
-                      <td className="px-4 py-2 text-right text-xs text-slate-500">
-                        {j.lastRunDate ? new Date(j.lastRunDate).toLocaleDateString() : '—'}
-                      </td>
-                    </tr>
+                    <button key={p} onClick={() => setJobProvider(p)}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-all ${
+                        active ? 'border-white/20 text-white bg-white/10' : 'border-white/5 text-slate-400 hover:text-white hover:border-white/15'
+                      }`}>
+                      {p && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />}
+                      {p || 'All'}
+                      <span className="opacity-50 font-mono">{count}</span>
+                    </button>
                   );
-                  });
-                })()}
-              </tbody>
-            </table>
+                })}
+              </div>
+            </div>
+
+            {/* Table */}
+            <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-surface-2 z-10">
+                  <tr className="border-b border-white/5 text-xs text-slate-500 uppercase tracking-wider">
+                    <th className="px-4 py-2 text-left">Job / Prompt</th>
+                    <th className="px-4 py-2 text-left">Provider · Model</th>
+                    <th className="px-4 py-2 text-right">Input Tok</th>
+                    <th className="px-4 py-2 text-right">Output Tok</th>
+                    <th className="px-4 py-2 text-right">Total Tok</th>
+                    <th className="px-4 py-2 text-right">Cost</th>
+                    <th className="px-4 py-2 text-right">Last Run</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {filtered.length === 0 ? (
+                    <tr><td colSpan={7} className="px-4 py-8 text-center text-xs text-slate-500">No sessions found</td></tr>
+                  ) : filtered.map((j, i) => {
+                    const totalTok  = j.inputTokens + j.outputTokens;
+                    const pct       = grandTotal > 0 ? Math.round((totalTok / grandTotal) * 100) : 0;
+                    const provColor = PROVIDER_COLORS[j.provider] ?? '#6366f1';
+                    const isRemote  = j.provider !== 'ollama';
+                    return (
+                      <tr key={i} className={`hover:bg-white/2 ${isRemote ? 'border-l-2' : ''}`}
+                          style={isRemote ? { borderLeftColor: provColor } : {}}>
+                        <td className="px-4 py-2.5 max-w-[260px]">
+                          <div className="flex flex-col gap-1">
+                            <span className="text-xs text-slate-200 truncate font-medium">{j.label || '(unnamed)'}</span>
+                            <div className="flex items-center gap-1.5">
+                              <div className="flex-1 bg-surface-4 rounded-full h-1">
+                                <div className="h-1 rounded-full transition-all" style={{ width: `${pct}%`, background: provColor + '99' }} />
+                              </div>
+                              <span className="text-[10px] text-slate-500 font-mono shrink-0">{pct}%</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <div className="flex flex-col gap-0.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: provColor }} />
+                              <span className="text-xs font-semibold" style={{ color: provColor }}>{j.provider}</span>
+                            </div>
+                            <span className="font-mono text-[10px] text-slate-500 truncate max-w-[140px]">{j.model}</span>
+                          </div>
+                        </td>
+                        <td className={`px-4 py-2.5 text-right font-mono text-xs text-slate-300 ${blur}`}>{formatTokens(j.inputTokens)}</td>
+                        <td className={`px-4 py-2.5 text-right font-mono text-xs text-accent-cyan ${blur}`}>{formatTokens(j.outputTokens)}</td>
+                        <td className={`px-4 py-2.5 text-right font-mono text-xs font-semibold text-white ${blur}`}>{formatTokens(totalTok)}</td>
+                        <td className={`px-4 py-2.5 text-right font-mono text-xs ${isRemote ? 'text-accent-amber' : 'text-slate-500'} ${blur}`}>
+                          {j.cost > 0 ? `$${j.cost.toFixed(4)}` : isRemote ? '$0.00' : 'Local'}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-xs text-slate-500">
+                          {j.lastRunDate ? new Date(j.lastRunDate).toLocaleDateString() : '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Savings */}
       {savings && (

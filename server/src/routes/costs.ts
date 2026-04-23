@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet } from '../db/database';
-import { readGatewayCostSummary } from '../lib/gatewayReader';
+import { readGatewayCostSummary, readGatewaySessionsJson } from '../lib/gatewayReader';
 
 export const costsRouter = Router();
 
@@ -75,6 +75,24 @@ costsRouter.get('/summary', (req: Request, res: Response) => {
     by_model:      Object.entries(modMap).map(([model, v])     => ({ model, ...v })).sort((a, b) => b.cost - a.cost),
     by_job:        gw.byJob,           // per-job/session token breakdown from sessions.json
     daily:         Object.entries(dailyMap).map(([date, v])    => ({ date, ...v })).sort((a, b) => a.date.localeCompare(b.date)),
+  });
+});
+
+// Debug: raw sessions.json dump — use to verify what providers/labels exist
+costsRouter.get('/sessions-debug', (_req: Request, res: Response) => {
+  const sessions = readGatewaySessionsJson();
+  res.json({
+    count: sessions.length,
+    providers: [...new Set(sessions.map(s => s.modelProvider))],
+    sessions: sessions.map(s => ({
+      key:          s.key,
+      jobId:        s.jobId,
+      label:        s.label,
+      provider:     s.modelProvider,
+      model:        s.model,
+      inputTokens:  s.inputTokens,
+      outputTokens: s.outputTokens,
+    })),
   });
 });
 
