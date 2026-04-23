@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../db/database';
 import { bus } from '../events/eventBus';
 import { v4 as uuidv4 } from 'uuid';
-import { readGatewaySessions } from '../lib/gatewayReader';
+import { readGatewaySessions, readGatewaySessionsJson } from '../lib/gatewayReader';
 
 export const sessionsRouter = Router();
 
@@ -15,18 +15,60 @@ sessionsRouter.get('/', (req: Request, res: Response) => {
   params.push(Number(limit), Number(offset));
   const ccSessions = dbAll(sql, params);
 
+  // Real token data from sessions.json (keyed by jobId)
+  const sessionEntries = readGatewaySessionsJson();
+  const tokensByJobId  = new Map(sessionEntries.map(s => [s.jobId, s]));
+
   // Merge with real OpenClaw task_runs (each run = a session)
   const gwSessions = readGatewaySessions()
-    .filter(s => !status || s.status === status);  // apply status filter
+    .map(s => {
+      // Enrich with real token counts if available
+      const tokens = tokensByJobId.get(s.id) ?? tokensByJobId.get(s.name);
+      if (tokens) {
+        return {
+          ...s,
+          input_tokens:  tokens.inputTokens,
+          output_tokens: tokens.outputTokens,
+          total_cost:    tokens.estimatedCostUsd,
+          model:         tokens.model || s.model,
+          provider:      tokens.modelProvider || s.provider,
+        };
+      }
+      return s;
+    })
+    .filter(s => !status || s.status === status);
+
+  // Also add sessions.json entries that don't have a task_run (direct sessions)
+  const gwIds = new Set(gwSessions.map(s => s.id));
+  const directSessions = sessionEntries
+    .filter(s => !gwIds.has(s.jobId))
+    .map(s => ({
+      id:            s.sessionId || s.jobId,
+      workspace_id:  'default',
+      name:          s.label,
+      model:         s.model,
+      provider:      s.modelProvider,
+      status:        'idle' as const,
+      input_tokens:  s.inputTokens,
+      output_tokens: s.outputTokens,
+      total_cost:    s.estimatedCostUsd,
+      message_count: 1,
+      error_count:   0,
+      started_at:    null,
+      last_active:   null,
+      source:        'gateway' as const,
+    }))
+    .filter(s => !status || s.status === status);
 
   // Deduplicate: CC sessions take priority (by id)
   const ccIds = new Set(ccSessions.map((s: any) => s.id));
   const merged = [
     ...ccSessions,
     ...gwSessions.filter(s => !ccIds.has(s.id)),
+    ...directSessions.filter(s => !ccIds.has(s.id)),
   ].slice(Number(offset), Number(offset) + Number(limit));
 
-  const total = ccSessions.length + gwSessions.length;
+  const total = ccSessions.length + gwSessions.length + directSessions.length;
   res.json({ sessions: merged, total });
 });
 

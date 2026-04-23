@@ -3,10 +3,12 @@
  * Reads directly from OpenClaw gateway files and SQLite databases (read-only).
  *
  * Sources discovered:
- *   ~/.openclaw/cron/jobs.json          → cron job definitions (name, schedule, model, state)
- *   ~/.openclaw/tasks/runs.sqlite       → task_runs (execution history, owner_key links to job id)
- *   ~/.openclaw/memory/main.sqlite      → files + chunks (memory browser)
- *   ~/.openclaw/logs/commands.log       → JSON-lines command log (logs explorer)
+ *   ~/.openclaw/cron/jobs.json                      → cron job definitions
+ *   ~/.openclaw/tasks/runs.sqlite                   → task_runs (execution history)
+ *   ~/.openclaw/memory/main.sqlite                  → files + chunks (memory browser)
+ *   ~/.openclaw/logs/config-audit.jsonl             → config change audit log
+ *   /tmp/openclaw/openclaw-YYYY-MM-DD.log           → structured gateway logs (primary)
+ *   ~/.openclaw/agents/main/sessions/sessions.json  → real token counts per session
  */
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
@@ -20,6 +22,7 @@ const MEMORY_DB     = path.join(OC_DIR, 'memory', 'main.sqlite');
 const CRON_JSON     = path.join(OC_DIR, 'cron',   'jobs.json');
 const COMMANDS_LOG  = path.join(OC_DIR, 'logs', 'commands.log');
 const AUDIT_LOG     = path.join(OC_DIR, 'logs', 'config-audit.jsonl');
+const SESSIONS_JSON = path.join(OC_DIR, 'agents', 'main', 'sessions', 'sessions.json');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function toIso(ts: number | null | undefined): string | null {
@@ -438,6 +441,143 @@ export function readGatewayMemoryStats() {
     return null;
   } finally {
     try { db?.close(); } catch {} }
+}
+
+// ── Sessions JSON (real token counts) ────────────────────────────────────────
+/**
+ * Reads ~/.openclaw/agents/main/sessions/sessions.json
+ * Each key is like "agent:main:cron:{job_id}" and each value has:
+ *   inputTokens, outputTokens, cacheRead, cacheWrite,
+ *   estimatedCostUsd, model, modelProvider, label, sessionId
+ */
+export interface GatewaySessionEntry {
+  key: string;
+  jobId: string;
+  label: string;
+  model: string;
+  modelProvider: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
+  estimatedCostUsd: number;
+  sessionId: string;
+}
+
+export function readGatewaySessionsJson(): GatewaySessionEntry[] {
+  if (!fs.existsSync(SESSIONS_JSON)) return [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(SESSIONS_JSON, 'utf-8'));
+    const entries: GatewaySessionEntry[] = [];
+    for (const [key, val] of Object.entries(raw as Record<string, any>)) {
+      const parts = key.split(':');           // agent:main:cron:{uuid}
+      const jobId = parts[parts.length - 1]; // last segment
+      entries.push({
+        key,
+        jobId,
+        label:          String(val.label ?? key),
+        model:          String(val.model ?? ''),
+        modelProvider:  String(val.modelProvider ?? 'unknown'),
+        inputTokens:    Number(val.inputTokens  ?? 0),
+        outputTokens:   Number(val.outputTokens ?? 0),
+        cacheRead:      Number(val.cacheRead     ?? 0),
+        cacheWrite:     Number(val.cacheWrite    ?? 0),
+        estimatedCostUsd: Number(val.estimatedCostUsd ?? 0),
+        sessionId:      String(val.sessionId ?? ''),
+      });
+    }
+    return entries;
+  } catch (err) {
+    console.error('[gateway:sessions-json]', err);
+    return [];
+  }
+}
+
+// ── Cost Summary (derived from sessions.json + task_runs dates) ───────────────
+export interface GatewayCostSummary {
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  isLocalModel: boolean;   // true if all providers are ollama (cost = $0)
+  byProvider: { provider: string; cost: number; inputTokens: number; outputTokens: number }[];
+  byModel:    { model: string; provider: string; cost: number; requests: number; tokens: number }[];
+  daily:      { date: string; cost: number; tokens: number }[];
+}
+
+export function readGatewayCostSummary(days: number = 30): GatewayCostSummary {
+  const sessions = readGatewaySessionsJson();
+
+  // Load task_runs dates so we can group by day
+  // task_runs owner_key = "system:cron:{jobId}" → matches sessions key last segment
+  const runDates: Record<string, string> = {}; // jobId → ISO date string
+  if (fs.existsSync(TASKS_DB)) {
+    let db: DatabaseSync | null = null;
+    try {
+      db = new DatabaseSync(TASKS_DB, { readOnly: true });
+      const since = new Date(Date.now() - days * 86400_000).getTime() / 1000;
+      const rows  = db.prepare(
+        `SELECT owner_key, started_at FROM task_runs WHERE started_at >= ? ORDER BY started_at DESC`
+      ).all(since) as any[];
+      for (const r of rows) {
+        const jobId = String(r.owner_key ?? '').split(':').pop() ?? '';
+        if (jobId && !runDates[jobId]) {
+          const ms = r.started_at > 1e12 ? r.started_at : r.started_at * 1000;
+          runDates[jobId] = new Date(ms).toISOString().slice(0, 10); // YYYY-MM-DD
+        }
+      }
+    } catch { /* ignore */ } finally { try { db?.close(); } catch {} }
+  }
+
+  // Aggregate
+  let totalCost = 0;
+  let totalIn   = 0;
+  let totalOut  = 0;
+  const providerMap: Record<string, { cost: number; inputTokens: number; outputTokens: number }> = {};
+  const modelMap:    Record<string, { provider: string; cost: number; requests: number; tokens: number }> = {};
+  const dailyMap:    Record<string, { cost: number; tokens: number }> = {};
+  let allOllama = true;
+
+  for (const s of sessions) {
+    totalCost += s.estimatedCostUsd;
+    totalIn   += s.inputTokens;
+    totalOut  += s.outputTokens;
+    if (s.modelProvider !== 'ollama') allOllama = false;
+
+    // By provider
+    const prov = providerMap[s.modelProvider] ?? { cost: 0, inputTokens: 0, outputTokens: 0 };
+    prov.cost         += s.estimatedCostUsd;
+    prov.inputTokens  += s.inputTokens;
+    prov.outputTokens += s.outputTokens;
+    providerMap[s.modelProvider] = prov;
+
+    // By model
+    const mod = modelMap[s.model] ?? { provider: s.modelProvider, cost: 0, requests: 0, tokens: 0 };
+    mod.cost     += s.estimatedCostUsd;
+    mod.requests += 1;
+    mod.tokens   += s.inputTokens + s.outputTokens;
+    modelMap[s.model] = mod;
+
+    // By day — use task_run date if available, else today
+    const date = runDates[s.jobId] ?? new Date().toISOString().slice(0, 10);
+    const day  = dailyMap[date] ?? { cost: 0, tokens: 0 };
+    day.cost   += s.estimatedCostUsd;
+    day.tokens += s.inputTokens + s.outputTokens;
+    dailyMap[date] = day;
+  }
+
+  return {
+    totalCost,
+    totalInputTokens:  totalIn,
+    totalOutputTokens: totalOut,
+    isLocalModel: allOllama && sessions.length > 0,
+    byProvider: Object.entries(providerMap).map(([provider, v]) => ({ provider, ...v }))
+                  .sort((a, b) => b.tokens - a.tokens),
+    byModel: Object.entries(modelMap).map(([model, v]) => ({ model, ...v }))
+               .sort((a, b) => b.tokens - a.tokens),
+    daily: Object.entries(dailyMap)
+             .map(([date, v]) => ({ date, ...v }))
+             .sort((a, b) => a.date.localeCompare(b.date)),
+  };
 }
 
 export const gatewayAvailable = () =>

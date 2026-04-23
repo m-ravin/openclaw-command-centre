@@ -34,6 +34,7 @@ export default function CostsPage() {
     `/costs/summary?workspace=${workspace}&days=${days}`,
     (u: string) => get<{
       total_cost: number; today_cost: number; budget_usd: number; total_tokens: number;
+      is_local_model: boolean;
       by_provider: { provider: string; cost: number; tokens: number }[];
       by_model:    { model: string; provider: string; cost: number; requests: number }[];
       daily:       { date: string; cost: number; tokens: number }[];
@@ -88,9 +89,20 @@ export default function CostsPage() {
         </div>
       </div>
 
+      {/* Local model notice */}
+      {costs?.is_local_model && (
+        <div className="flex items-start gap-3 bg-brand/5 border border-brand/20 rounded-xl px-4 py-3 text-sm">
+          <Zap className="w-4 h-4 text-brand mt-0.5 shrink-0" />
+          <div>
+            <span className="font-semibold text-brand">Running on local Ollama models</span>
+            <span className="text-slate-400 ml-2">— API cost is $0. Token volume is tracked from real session data.</span>
+          </div>
+        </div>
+      )}
+
       {/* KPI row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label={`Total (${periodLabel})`} value={<span className={blur}>{formatCost(costs?.total_cost ?? 0)}</span>} icon={DollarSign} iconColor="text-accent-amber" glow />
+        <StatCard label={`Total (${periodLabel})`} value={<span className={blur}>{costs?.is_local_model ? 'Local / $0' : formatCost(costs?.total_cost ?? 0)}</span>} icon={DollarSign} iconColor="text-accent-amber" glow />
         <StatCard label="Today"        value={<span className={blur}>{formatCost(costs?.today_cost ?? 0)}</span>} icon={Clock} iconColor="text-brand" />
         <StatCard label="Total Tokens" value={<span className={blur}>{formatTokens(costs?.total_tokens ?? 0)}</span>} icon={Zap} iconColor="text-accent-cyan" />
         <StatCard label="ROI"          value={<span className={blur}>{savings?.roi_multiplier ?? '—'}×</span>} sub="vs human work" icon={TrendingUp} iconColor="text-accent-green" />
