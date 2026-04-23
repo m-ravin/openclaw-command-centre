@@ -4,8 +4,8 @@
   "description": "OpenClaw Command Centre — Backend Server",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "node --experimental-sqlite --import tsx/esm src/index.ts",
-    "dev:tsx": "tsx --conditions=node src/index.ts",
+    "dev": "NODE_OPTIONS=--experimental-sqlite tsx src/index.ts",
+    "dev:node": "node --experimental-sqlite --import tsx/esm src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "db:seed": "tsx src/db/seed.ts"
