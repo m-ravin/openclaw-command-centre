@@ -218,109 +218,156 @@ export function readGatewayOperators(): GatewayOperator[] {
     try { db?.close(); } catch {} }
 }
 
-// ── Logs (config-audit.jsonl + commands.log JSON lines) ──────────────────────
+// ── Logs (/tmp/openclaw/openclaw-YYYY-MM-DD.log JSON lines) ──────────────────
+const TMP_LOG_DIR = '/tmp/openclaw';
+
 export interface GatewayLog {
   id: string; workspace_id: string; level: string;
   source: string; message: string; logged_at: string;
   session_id: string | null; data: string; gateway_source: 'gateway';
 }
 
-/** Extract a human-readable message from an audit log entry */
-function auditMessage(entry: any): string {
-  const event = String(entry.event ?? entry.action ?? 'event');
-  // Pull the meaningful openclaw sub-command from argv (skip node binary and openclaw binary)
-  let cmd = '';
-  if (Array.isArray(entry.argv) && entry.argv.length > 2) {
-    cmd = entry.argv.slice(2).join(' ');
-  }
-  const suspiciousNote = Array.isArray(entry.suspicious) && entry.suspicious.length
-    ? ` ⚠ ${entry.suspicious.join(', ')}`
-    : '';
-  return cmd
-    ? `[${event}] ${cmd}${suspiciousNote}`
-    : `[${event}] ${entry.configPath ?? entry.sessionKey ?? ''}${suspiciousNote}`.trim();
-}
-
-/** Derive log level from audit entry fields */
-function auditLevel(entry: any): string {
-  const event  = String(entry.event ?? entry.action ?? '').toLowerCase();
-  const source = String(entry.source ?? '').toLowerCase();
-  const suspicious = Array.isArray(entry.suspicious) ? entry.suspicious : [];
-
-  if (event.includes('error') || event.includes('fail') ||
-      source.includes('error') || entry.result === 'error') return 'error';
-  if (event.includes('warn') || suspicious.length > 0)       return 'warn';
-  return 'info';
-}
-
-/** Parse a single JSONL file and return log entries, newest-first */
-function parseJsonlLog(
-  filePath: string,
-  idPrefix: string,
-  startIdx: number,
-  opts?: { q?: string; level?: string; limit?: number },
-): { logs: GatewayLog[]; nextIdx: number } {
-  const logs: GatewayLog[] = [];
-  let idx = startIdx;
-  if (!fs.existsSync(filePath)) return { logs, nextIdx: idx };
-
+/**
+ * Parse an OpenClaw structured log line.
+ * Format: { "0": subsystemJson|message, "1": message (optional),
+ *            "_meta": { logLevelName, name, date }, "time": ISO }
+ */
+function parseOcLogLine(line: string, idx: number): GatewayLog | null {
   try {
-    const lines = fs.readFileSync(filePath, 'utf-8')
-      .trim().split('\n').filter(Boolean).reverse(); // newest first
+    const e = JSON.parse(line);
+    const meta = e._meta ?? {};
 
-    for (const line of lines) {
-      if (logs.length >= (opts?.limit ?? 500)) break;
-      try {
-        const entry = JSON.parse(line);
-        const src   = String(entry.source ?? 'gateway');
-        const msg   = auditMessage(entry);
-        const lv    = auditLevel(entry);
-        const ts    = entry.ts ?? entry.timestamp ?? new Date().toISOString();
+    // Extract subsystem name (stored as JSON string in _meta.name)
+    let subsystem = 'gateway';
+    try {
+      const parsed = JSON.parse(meta.name ?? '{}');
+      subsystem = parsed.subsystem ?? meta.name ?? 'gateway';
+    } catch { subsystem = String(meta.name ?? 'gateway'); }
 
-        if (opts?.level && opts.level !== lv) continue;
-        if (opts?.q) {
-          const q = opts.q.toLowerCase();
-          if (!msg.toLowerCase().includes(q) && !src.toLowerCase().includes(q)) continue;
-        }
-
-        logs.push({
-          id:             `${idPrefix}-${idx++}`,
-          workspace_id:   'default',
-          level:          lv,
-          source:         src,
-          message:        msg,
-          logged_at:      ts,
-          session_id:     entry.sessionKey ?? null,
-          data:           JSON.stringify(entry),
-          gateway_source: 'gateway',
-        });
-      } catch { /* skip malformed lines */ }
+    // Extract human-readable message:
+    // If "0" is a JSON object (subsystem descriptor), the real message is in "1"
+    // Otherwise "0" IS the message
+    let msg = '';
+    try {
+      const part0 = JSON.parse(e['0'] ?? '');
+      // part0 is an object (subsystem descriptor) → message is in "1"
+      msg = String(e['1'] ?? part0.subsystem ?? '');
+    } catch {
+      msg = String(e['0'] ?? '');
     }
-  } catch (err) {
-    console.error(`[gateway:logs:${filePath}]`, err);
-  }
-  return { logs, nextIdx: idx };
+    if (e['1'] && msg === e['0']) msg = String(e['1']); // fallback: prefer "1"
+
+    // Level: use logLevelName from _meta
+    const lvName = String(meta.logLevelName ?? 'INFO').toUpperCase();
+    const lv = lvName === 'ERROR' ? 'error'
+             : lvName === 'WARN'  ? 'warn'
+             : lvName === 'DEBUG' ? 'debug'
+             : 'info';
+
+    const ts = e.time ?? meta.date ?? new Date().toISOString();
+
+    return {
+      id:             `gw-oc-${idx}`,
+      workspace_id:   'default',
+      level:          lv,
+      source:         subsystem,
+      message:        msg || `[${lvName}]`,
+      logged_at:      ts,
+      session_id:     null,
+      data:           line,   // keep raw line as data for detail view
+      gateway_source: 'gateway',
+    };
+  } catch { return null; }
 }
 
 export function readGatewayLogs(opts?: { q?: string; level?: string; limit?: number }): GatewayLog[] {
   const maxLimit = opts?.limit ?? 200;
+  const logs: GatewayLog[] = [];
 
-  // Read audit log first (primary source — many entries)
-  const { logs: auditLogs, nextIdx } = parseJsonlLog(AUDIT_LOG, 'gw-audit', 0, { ...opts, limit: maxLimit });
+  // ── Primary: /tmp/openclaw/openclaw-YYYY-MM-DD.log files ──────────────────
+  // Read all daily log files, sorted newest-date first
+  if (fs.existsSync(TMP_LOG_DIR)) {
+    try {
+      const logFiles = fs.readdirSync(TMP_LOG_DIR)
+        .filter(f => /^openclaw-\d{4}-\d{2}-\d{2}\.log$/.test(f))
+        .sort()          // lexicographic = chronological for YYYY-MM-DD
+        .reverse();      // newest date first
 
-  // Also pull from commands.log (secondary — usually few entries)
-  const { logs: cmdLogs } = parseJsonlLog(COMMANDS_LOG, 'gw-cmd', nextIdx,
-    { ...opts, limit: Math.max(0, maxLimit - auditLogs.length) });
+      let idx = 0;
+      for (const fname of logFiles) {
+        if (logs.length >= maxLimit) break;
+        const fpath = path.join(TMP_LOG_DIR, fname);
+        try {
+          const lines = fs.readFileSync(fpath, 'utf-8')
+            .split('\n').filter(Boolean);
 
-  // Merge and sort newest-first, deduplicate by message+timestamp
-  const seen = new Set<string>();
-  const merged: GatewayLog[] = [];
-  for (const log of [...auditLogs, ...cmdLogs]) {
-    const key = `${log.logged_at}|${log.message}`;
-    if (!seen.has(key)) { seen.add(key); merged.push(log); }
+          // Read from the END (newest entries) — large files need tail approach
+          const tail = lines.slice(-Math.min(lines.length, maxLimit * 10)).reverse();
+
+          for (const line of tail) {
+            if (logs.length >= maxLimit) break;
+            const log = parseOcLogLine(line, idx++);
+            if (!log) continue;
+            if (opts?.level && opts.level !== log.level) continue;
+            if (opts?.q) {
+              const q = opts.q.toLowerCase();
+              if (!log.message.toLowerCase().includes(q) &&
+                  !log.source.toLowerCase().includes(q)) continue;
+            }
+            logs.push(log);
+          }
+        } catch (err) {
+          console.error(`[gateway:logs:${fname}]`, err);
+        }
+      }
+    } catch (err) {
+      console.error('[gateway:logs:readdir]', err);
+    }
   }
-  merged.sort((a, b) => new Date(b.logged_at).getTime() - new Date(a.logged_at).getTime());
-  return merged.slice(0, maxLimit);
+
+  // ── Secondary: config-audit.jsonl (config change events) ──────────────────
+  // Only fill remaining slots from this file
+  const remaining = maxLimit - logs.length;
+  if (remaining > 0 && fs.existsSync(AUDIT_LOG)) {
+    try {
+      const lines = fs.readFileSync(AUDIT_LOG, 'utf-8')
+        .split('\n').filter(Boolean).reverse();
+      let idx = 100000;
+      for (const line of lines) {
+        if (logs.length >= maxLimit) break;
+        try {
+          const e = JSON.parse(line);
+          const event = String(e.event ?? 'config.event');
+          let cmd = Array.isArray(e.argv) && e.argv.length > 2
+            ? e.argv.slice(2).join(' ') : (e.configPath ?? '');
+          const suspicious = Array.isArray(e.suspicious) && e.suspicious.length
+            ? ` ⚠ ${e.suspicious.join(', ')}` : '';
+          const msg = `[${event}] ${cmd}${suspicious}`.trim();
+          const lv  = event.includes('error') || e.result === 'error' ? 'error'
+                    : (e.suspicious?.length ?? 0) > 0 ? 'warn' : 'info';
+          const ts  = e.ts ?? e.timestamp ?? new Date().toISOString();
+
+          if (opts?.level && opts.level !== lv) continue;
+          if (opts?.q) {
+            const q = opts.q.toLowerCase();
+            if (!msg.toLowerCase().includes(q) && !String(e.source ?? '').toLowerCase().includes(q)) continue;
+          }
+          logs.push({
+            id: `gw-audit-${idx++}`, workspace_id: 'default',
+            level: lv, source: String(e.source ?? 'config-io'),
+            message: msg, logged_at: ts, session_id: null,
+            data: line, gateway_source: 'gateway',
+          });
+        } catch { /* skip */ }
+      }
+    } catch (err) {
+      console.error('[gateway:logs:audit]', err);
+    }
+  }
+
+  // Sort all results newest-first
+  logs.sort((a, b) => new Date(b.logged_at).getTime() - new Date(a.logged_at).getTime());
+  return logs.slice(0, maxLimit);
 }
 
 // ── Memory ────────────────────────────────────────────────────────────────────
