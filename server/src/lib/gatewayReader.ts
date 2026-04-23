@@ -501,6 +501,7 @@ export interface GatewayCostSummary {
   isLocalModel: boolean;   // true if all providers are ollama (cost = $0)
   byProvider: { provider: string; cost: number; inputTokens: number; outputTokens: number }[];
   byModel:    { model: string; provider: string; cost: number; requests: number; tokens: number }[];
+  byJob:      { label: string; model: string; provider: string; inputTokens: number; outputTokens: number; cost: number; lastRunDate: string | null }[];
   daily:      { date: string; cost: number; tokens: number }[];
 }
 
@@ -565,6 +566,17 @@ export function readGatewayCostSummary(days: number = 30): GatewayCostSummary {
     dailyMap[date] = day;
   }
 
+  // Per-job breakdown — one row per session entry, sorted by token usage
+  const byJob = sessions.map(s => ({
+    label:        s.label,
+    model:        s.model,
+    provider:     s.modelProvider,
+    inputTokens:  s.inputTokens,
+    outputTokens: s.outputTokens,
+    cost:         s.estimatedCostUsd,
+    lastRunDate:  runDates[s.jobId] ?? null,
+  })).sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));
+
   return {
     totalCost,
     totalInputTokens:  totalIn,
@@ -574,6 +586,7 @@ export function readGatewayCostSummary(days: number = 30): GatewayCostSummary {
                   .sort((a, b) => b.tokens - a.tokens),
     byModel: Object.entries(modelMap).map(([model, v]) => ({ model, ...v }))
                .sort((a, b) => b.tokens - a.tokens),
+    byJob,
     daily: Object.entries(dailyMap)
              .map(([date, v]) => ({ date, ...v }))
              .sort((a, b) => a.date.localeCompare(b.date)),

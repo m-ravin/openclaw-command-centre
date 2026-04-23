@@ -73,6 +73,7 @@ costsRouter.get('/summary', (req: Request, res: Response) => {
     is_local_model: gw.isLocalModel,   // flag so UI can show "Local model" note
     by_provider:   Object.entries(provMap).map(([provider, v]) => ({ provider, ...v })).sort((a, b) => b.tokens - a.tokens),
     by_model:      Object.entries(modMap).map(([model, v])     => ({ model, ...v })).sort((a, b) => b.cost - a.cost),
+    by_job:        gw.byJob,           // per-job/session token breakdown from sessions.json
     daily:         Object.entries(dailyMap).map(([date, v])    => ({ date, ...v })).sort((a, b) => a.date.localeCompare(b.date)),
   });
 });

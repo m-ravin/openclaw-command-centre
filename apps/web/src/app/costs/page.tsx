@@ -6,7 +6,7 @@ import { useAppStore } from '@/store/appStore';
 import { StatCard } from '@/components/ui/StatCard';
 import { ProviderBadge } from '@/components/ui/Badge';
 import { formatCost, formatTokens } from '@/lib/utils';
-import { DollarSign, TrendingUp, Zap, Clock } from 'lucide-react';
+import { DollarSign, TrendingUp, Zap, Clock, Bot } from 'lucide-react';
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -37,6 +37,7 @@ export default function CostsPage() {
       is_local_model: boolean;
       by_provider: { provider: string; cost: number; tokens: number }[];
       by_model:    { model: string; provider: string; cost: number; requests: number }[];
+      by_job:      { label: string; model: string; provider: string; inputTokens: number; outputTokens: number; cost: number; lastRunDate: string | null }[];
       daily:       { date: string; cost: number; tokens: number }[];
     }>(u),
     { refreshInterval: 60000 }
@@ -222,6 +223,73 @@ export default function CostsPage() {
           </tbody>
         </table>
       </div>
+
+      {/* Token Usage by Job / Prompt */}
+      {costs?.by_job && costs.by_job.length > 0 && (
+        <div className="bg-surface-2 border border-white/5 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Bot className="w-4 h-4 text-brand" />
+              <h2 className="text-sm font-semibold text-white">Token Usage by Job / Prompt</h2>
+            </div>
+            <span className="text-xs text-slate-500">{costs.by_job.length} sessions</span>
+          </div>
+          <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-surface-2 z-10">
+                <tr className="border-b border-white/5 text-xs text-slate-500 uppercase tracking-wider">
+                  <th className="px-4 py-2 text-left">Job / Prompt</th>
+                  <th className="px-4 py-2 text-left">Model</th>
+                  <th className="px-4 py-2 text-right">Input Tok</th>
+                  <th className="px-4 py-2 text-right">Output Tok</th>
+                  <th className="px-4 py-2 text-right">Total Tok</th>
+                  <th className="px-4 py-2 text-right">Cost</th>
+                  <th className="px-4 py-2 text-right">Last Run</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {(() => {
+                  const grandTotal = costs.by_job.reduce((s, x) => s + x.inputTokens + x.outputTokens, 0);
+                  return costs.by_job.map((j, i) => {
+                  const totalTok = j.inputTokens + j.outputTokens;
+                  const pct = grandTotal > 0 ? Math.round((totalTok / grandTotal) * 100) : 0;
+                  return (
+                    <tr key={i} className="hover:bg-white/2">
+                      <td className="px-4 py-2 max-w-[260px]">
+                        <div className="flex flex-col gap-0.5">
+                          <span className="text-xs text-slate-200 truncate">{j.label || '(unnamed)'}</span>
+                          <div className="w-full bg-surface-4 rounded-full h-1 mt-0.5">
+                            <div className="h-1 rounded-full bg-brand/60" style={{ width: `${pct}%` }} />
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2">
+                        <div className="flex flex-col gap-0.5">
+                          <ProviderBadge provider={j.provider} />
+                          <span className="font-mono text-[10px] text-slate-500 truncate max-w-[120px]">{j.model}</span>
+                        </div>
+                      </td>
+                      <td className={`px-4 py-2 text-right font-mono text-xs text-slate-300 ${blur}`}>{formatTokens(j.inputTokens)}</td>
+                      <td className={`px-4 py-2 text-right font-mono text-xs text-accent-cyan ${blur}`}>{formatTokens(j.outputTokens)}</td>
+                      <td className={`px-4 py-2 text-right font-mono text-xs font-semibold text-white ${blur}`}>
+                        {formatTokens(totalTok)}
+                        <span className="ml-1 text-[10px] text-slate-500 font-normal">{pct}%</span>
+                      </td>
+                      <td className={`px-4 py-2 text-right font-mono text-xs text-accent-amber ${blur}`}>
+                        {j.cost > 0 ? `$${j.cost.toFixed(4)}` : costs.is_local_model ? 'Local' : '$0'}
+                      </td>
+                      <td className="px-4 py-2 text-right text-xs text-slate-500">
+                        {j.lastRunDate ? new Date(j.lastRunDate).toLocaleDateString() : '—'}
+                      </td>
+                    </tr>
+                  );
+                  });
+                })()}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Savings */}
       {savings && (
