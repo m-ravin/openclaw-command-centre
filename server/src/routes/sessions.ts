@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../db/database';
 import { bus } from '../events/eventBus';
 import { v4 as uuidv4 } from 'uuid';
+import { readGatewaySessions } from '../lib/gatewayReader';
 
 export const sessionsRouter = Router();
 
@@ -12,9 +13,21 @@ sessionsRouter.get('/', (req: Request, res: Response) => {
   if (status) { sql += ` AND status = ?`; params.push(status); }
   sql += ` ORDER BY last_active DESC LIMIT ? OFFSET ?`;
   params.push(Number(limit), Number(offset));
-  const sessions = dbAll(sql, params);
-  const total = (dbGet<{ n: number }>(`SELECT COUNT(*) as n FROM sessions WHERE workspace_id = ?`, [workspace])?.n) ?? 0;
-  res.json({ sessions, total });
+  const ccSessions = dbAll(sql, params);
+
+  // Merge with real OpenClaw task_runs (each run = a session)
+  const gwSessions = readGatewaySessions()
+    .filter(s => !status || s.status === status);  // apply status filter
+
+  // Deduplicate: CC sessions take priority (by id)
+  const ccIds = new Set(ccSessions.map((s: any) => s.id));
+  const merged = [
+    ...ccSessions,
+    ...gwSessions.filter(s => !ccIds.has(s.id)),
+  ].slice(Number(offset), Number(offset) + Number(limit));
+
+  const total = ccSessions.length + gwSessions.length;
+  res.json({ sessions: merged, total });
 });
 
 sessionsRouter.get('/:id', (req: Request, res: Response) => {
@@ -57,7 +70,9 @@ sessionsRouter.delete('/:id', (req: Request, res: Response) => {
 
 sessionsRouter.get('/stats/summary', (req: Request, res: Response) => {
   const { workspace = 'default' } = req.query;
-  const counts = dbAll<{ status: string; n: number }>(
+
+  // CC DB counts
+  const ccCounts = dbAll<{ status: string; n: number }>(
     `SELECT status, COUNT(*) as n FROM sessions WHERE workspace_id = ? GROUP BY status`,
     [workspace]
   );
@@ -67,5 +82,18 @@ sessionsRouter.get('/stats/summary', (req: Request, res: Response) => {
      FROM sessions WHERE workspace_id = ?`,
     [workspace]
   );
-  res.json({ counts, ...agg });
+
+  // Gateway counts — merge into cc counts map
+  const gwSessions = readGatewaySessions();
+  const countMap: Record<string, number> = {};
+  for (const c of ccCounts) countMap[c.status] = (countMap[c.status] ?? 0) + c.n;
+  for (const s of gwSessions) countMap[s.status] = (countMap[s.status] ?? 0) + 1;
+  const counts = Object.entries(countMap).map(([status, n]) => ({ status, n }));
+
+  res.json({
+    counts,
+    total_cost:     agg?.total_cost     ?? 0,
+    total_tokens:   agg?.total_tokens   ?? 0,
+    total_messages: (agg?.total_messages ?? 0) + gwSessions.length,
+  });
 });

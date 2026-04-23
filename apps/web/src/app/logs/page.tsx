@@ -20,6 +20,15 @@ const LEVEL_BG: Record<string, string> = {
   fatal: 'text-accent-rose font-semibold',
 };
 
+// Static level filter config — always shown regardless of DB data
+const LEVELS = [
+  { value: '',      label: 'All',   dot: 'bg-slate-500'      },
+  { value: 'debug', label: 'Debug', dot: 'bg-slate-400'      },
+  { value: 'info',  label: 'Info',  dot: 'bg-brand'          },
+  { value: 'warn',  label: 'Warn',  dot: 'bg-accent-amber'   },
+  { value: 'error', label: 'Error', dot: 'bg-accent-red'     },
+];
+
 export default function LogsPage() {
   const { workspace } = useAppStore();
   const [q, setQ]           = useState('');
@@ -71,32 +80,49 @@ export default function LogsPage() {
         </button>
       </div>
 
-      {/* Level summary chips */}
-      <div className="flex gap-2 flex-wrap">
-        {stats?.by_level?.map(l => (
-          <button key={l.level} onClick={() => setLevel(level === l.level ? '' : l.level)}
-            className={cn(
-              'px-3 py-1 rounded-full text-xs font-medium border transition-colors',
-              level === l.level ? 'bg-brand/15 text-brand border-brand/30' : 'border-white/5 text-slate-400 hover:text-white'
-            )}>
-            {l.level} <span className="opacity-60">({l.n})</span>
-          </button>
-        ))}
-      </div>
+      {/* ── Level filter bar — always visible ── */}
+      <div className="bg-surface-2 border border-white/5 rounded-xl p-3 flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-slate-500 font-medium mr-1 shrink-0">Level:</span>
+        {LEVELS.map(l => {
+          // Count from stats (DB) if available; gateway logs don't have pre-counts
+          const count = l.value
+            ? (stats?.by_level?.find(s => s.level === l.value)?.n ?? null)
+            : null;
+          const active = level === l.value;
+          return (
+            <button
+              key={l.value}
+              onClick={() => { setLevel(l.value); setPage(0); }}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
+                active
+                  ? 'bg-brand/15 text-brand border-brand/30 shadow-sm'
+                  : 'border-white/5 text-slate-400 hover:text-white hover:border-white/15'
+              )}>
+              <span className={cn('w-2 h-2 rounded-full shrink-0', l.dot)} />
+              {l.label}
+              {count !== null && (
+                <span className={cn('opacity-60 font-mono', active ? 'text-brand' : '')}>{count}</span>
+              )}
+            </button>
+          );
+        })}
 
-      {/* Search + filters */}
-      <div className="flex gap-3 flex-wrap">
-        <div className="flex-1 min-w-[200px] relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+        {/* Search box inline with level filter */}
+        <div className="flex-1 min-w-[180px] relative ml-2">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-500" />
           <input
             value={q} onChange={e => { setQ(e.target.value); setPage(0); }}
-            placeholder="Search log messages…"
-            className="w-full bg-surface-2 border border-white/5 rounded-lg pl-9 pr-3 py-2 text-sm
+            placeholder="Search messages…"
+            className="w-full bg-surface-3 border border-white/5 rounded-lg pl-8 pr-3 py-1.5 text-xs
                        text-slate-300 focus:outline-none focus:border-brand/40 transition-colors"
           />
         </div>
+
+        {/* Source dropdown */}
         <select value={source} onChange={e => setSource(e.target.value)}
-          className="bg-surface-2 border border-white/5 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none">
+          className="bg-surface-3 border border-white/5 rounded-lg px-3 py-1.5 text-xs text-slate-300
+                     focus:outline-none focus:border-brand/40 transition-colors">
           <option value="">All sources</option>
           {sources?.map(s => <option key={s.source} value={s.source}>{s.source} ({s.n})</option>)}
         </select>

@@ -442,3 +442,97 @@ export function readGatewayMemoryStats() {
 
 export const gatewayAvailable = () =>
   fs.existsSync(TASKS_DB) || fs.existsSync(CRON_JSON);
+
+// ── Sessions (task_runs as sessions) ─────────────────────────────────────────
+/**
+ * OpenClaw doesn't have a dedicated "sessions" table.
+ * Each task_run represents one agent session (a single cron job execution or
+ * channel conversation turn). We surface them here so the Sessions page
+ * shows real activity instead of blank.
+ *
+ * owner_key formats seen:
+ *   system:cron:{job_id}       → scheduled cron run
+ *   channel:{channel}:{key}    → channel (WhatsApp, etc.) conversation
+ */
+export interface GatewaySession {
+  id: string; workspace_id: string; name: string;
+  model: string | null; provider: string;
+  status: string; input_tokens: number; output_tokens: number;
+  total_cost: number; message_count: number; error_count: number;
+  started_at: string | null; last_active: string | null;
+  source: 'gateway';
+}
+
+export function readGatewaySessions(): GatewaySession[] {
+  if (!fs.existsSync(TASKS_DB)) return [];
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(TASKS_DB, { readOnly: true });
+    const rows = db.prepare(`
+      SELECT task_id, owner_key, status, started_at, ended_at,
+             last_event_at, terminal_summary, progress_summary, error
+      FROM task_runs
+      ORDER BY COALESCE(last_event_at, started_at) DESC
+      LIMIT 200
+    `).all() as any[];
+
+    // Load cron job names for resolving owner_key → display name
+    let jobNames: Record<string, string> = {};
+    let jobModels: Record<string, string> = {};
+    if (fs.existsSync(CRON_JSON)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(CRON_JSON, 'utf-8'));
+        for (const j of (raw.jobs ?? [])) {
+          jobNames[j.id]  = j.name;
+          jobModels[j.id] = j.payload?.model ?? null;
+        }
+      } catch {}
+    }
+
+    return rows.map(r => {
+      const ownerKey  = String(r.owner_key ?? '');
+      const parts     = ownerKey.split(':');
+      const kind      = parts[0] ?? 'system';         // "system" | "channel"
+      const jobId     = parts[parts.length - 1] ?? '';
+
+      // Build a friendly display name
+      let name: string;
+      if (kind === 'system' && jobNames[jobId]) {
+        name = jobNames[jobId];                        // e.g. "Daily AI News"
+      } else if (kind === 'channel') {
+        name = `${parts[1] ?? 'channel'} / ${parts[2] ?? jobId}`;  // e.g. "whatsapp / default"
+      } else {
+        name = ownerKey || r.task_id;
+      }
+
+      const model    = jobModels[jobId] ?? null;
+      const provider = model?.startsWith('claude') ? 'Anthropic'
+                     : model?.includes('gpt')      ? 'OpenAI'
+                     : model?.includes('groq')     ? 'Groq'
+                     : 'OpenClaw';
+
+      const status = mapStatus(r.status);
+
+      return {
+        id:            r.task_id as string,
+        workspace_id:  'default',
+        name,
+        model,
+        provider,
+        status,
+        input_tokens:  0,   // task_runs doesn't store token counts
+        output_tokens: 0,
+        total_cost:    0,
+        message_count: 1,   // each task run = 1 execution
+        error_count:   status === 'error' ? 1 : 0,
+        started_at:    toIso(r.started_at),
+        last_active:   toIso(r.last_event_at ?? r.ended_at ?? r.started_at),
+        source:        'gateway' as const,
+      };
+    });
+  } catch (err) {
+    console.error('[gateway:sessions]', err);
+    return [];
+  } finally {
+    try { db?.close(); } catch {} }
+}
